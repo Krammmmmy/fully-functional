@@ -480,6 +480,61 @@
   gap: 24px;
   margin-top: 22px;
 }
+.temperature-card,
+.manual-dispense-card {
+  padding: 25px;
+}
+.temperature-status {
+  border-radius: 99px;
+  background: #eaf3ed;
+  color: #527a64;
+  padding: 5px 9px;
+  font-size: 9px;
+  font-weight: 700;
+}
+.temperature-reading {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin: 20px 0 15px;
+}
+.temperature-reading strong {
+  font-size: 30px;
+  letter-spacing: -1px;
+}
+.temperature-reading small {
+  margin-left: 3px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+}
+.temperature-track {
+  height: 7px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: #eee8eb;
+}
+.temperature-track span {
+  display: block;
+  width: 50%;
+  height: 100%;
+  border-radius: inherit;
+  background: #67977b;
+}
+.temperature-card > p,
+.manual-dispense-card > p {
+  margin-top: 11px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.manual-dispense-card .eyebrow {
+  display: block;
+  margin-top: 16px;
+}
+.manual-dispense-card > .full {
+  margin-top: 18px;
+}
 .level-item {
   display: flex;
   gap: 13px;
@@ -785,9 +840,9 @@
 }
 .schedule-row {
   display: grid;
-  grid-template-columns: 110px minmax(180px, 1fr) 190px 40px 30px 30px;
+  grid-template-columns: 96px minmax(0, 1fr) minmax(120px, 175px) auto 30px 30px;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   border-bottom: 1px solid var(--line);
   padding: 18px 24px;
   transition: 150ms ease;
@@ -825,6 +880,7 @@
   color: var(--water);
 }
 .schedule-details {
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
@@ -835,6 +891,10 @@
 .run-time {
   color: var(--muted);
   font-size: 10px;
+}
+.run-time {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .schedule-details em {
   margin-top: 3px;
@@ -1214,6 +1274,8 @@ fieldset legend {
   font-size: 9px;
 }
 .history-search {
+  position: relative;
+  z-index: 1;
   display: flex;
   width: 245px;
   align-items: center;
@@ -1228,8 +1290,12 @@ fieldset legend {
   box-shadow: 0 0 0 3px rgba(170, 94, 122, 0.1);
 }
 .history-search input {
+  position: relative;
+  z-index: 1;
   min-width: 0;
   flex: 1;
+  background: transparent;
+  pointer-events: auto;
   padding: 9px 0;
   color: var(--text);
   font-size: 10px;
@@ -1349,6 +1415,21 @@ fieldset legend {
   border-radius: 99px;
   padding: 4px 8px;
   font-size: 9px;
+  font-weight: 700;
+}
+.history-status-cell {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 5px;
+}
+.dispense-method {
+  color: #756970;
+  font-size: 9px;
+  font-weight: 600;
+}
+.dispense-method.manual {
+  color: var(--primary);
   font-weight: 700;
 }
 .operation-status i {
@@ -1800,7 +1881,7 @@ fieldset legend {
     max-width: none;
   }
   .schedule-row {
-    grid-template-columns: 105px minmax(130px, 1fr) 40px 30px 30px;
+    grid-template-columns: 90px minmax(0, 1fr) 40px 30px 30px;
   }
   .run-time {
     display: none;
@@ -1954,7 +2035,7 @@ fieldset legend {
     align-self: flex-end;
   }
   .schedule-row {
-    grid-template-columns: 92px 1fr 38px;
+    grid-template-columns: 82px minmax(0, 1fr) 38px;
     gap: 8px;
     padding: 16px;
   }

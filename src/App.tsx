@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "./lib/supabase";
 
 type Page = "dashboard" | "schedule" | "consumption" | "history" | "alerts";
 type ScheduleType = "Food" | "Water" | "Food & water";
@@ -25,6 +26,8 @@ type AlertItem = {
   level: "Attention" | "Notice";
   unread: boolean;
 };
+type SensorReading = { food_weight: number | null; water_weight: number | null; food_level: number | null; water_level: number | null; temperature: number | null; humidity: number | null; created_at: string };
+type DeviceStatus = { is_online: boolean; last_seen: string | null };
 type HistoryRecord = {
   id: number;
   date: string;
@@ -34,6 +37,7 @@ type HistoryRecord = {
   unit: "g" | "ml";
   status: "Successful" | "Failed";
   schedule: string;
+  method?: "Automatic" | "Manual";
 };
 
 const navItems: { id: Page; label: string; icon: IconName }[] = [
@@ -285,7 +289,8 @@ type IconName =
   | "x"
   | "info"
   | "history"
-  | "search";
+  | "search"
+  | "thermometer";
 
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -320,6 +325,12 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
       <>
         <circle cx="11" cy="11" r="7" />
         <path d="m20 20-4-4" />
+      </>
+    ),
+    thermometer: (
+      <>
+        <path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0Z" />
+        <path d="M12 11v6" />
       </>
     ),
     bell: (
@@ -434,89 +445,116 @@ function MiniChart() {
 function ConsumptionChart({
   mode,
   range,
+  records,
 }: {
   mode: "Line" | "Bar";
   range: "Today" | "7 Days" | "30 Days";
+  records: HistoryRecord[];
 }) {
-  const food = range === "Today" ? [18, 0, 24, 0, 18, 0, 25] : [68, 82, 72, 94, 78, 88, 80];
-  const water = range === "Today" ? [36, 22, 45, 28, 50, 34, 52] : [58, 64, 52, 73, 62, 78, 69];
-  const labels =
-    range === "Today"
-      ? ["6 AM", "9 AM", "12 PM", "3 PM", "6 PM", "9 PM", "12 AM"]
-      : range === "7 Days"
-        ? ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        : ["May 20", "May 25", "May 30", "Jun 4", "Jun 9", "Jun 14", "Jun 18"];
-  const toPoints = (values: number[]) =>
-    values.map((v, i) => `${60 + i * 92},${230 - v * 1.75}`).join(" ");
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const bucketCount = 7;
+  const buckets = Array.from({ length: bucketCount }, () => ({ food: 0, water: 0 }));
+  const bucketLabels: string[] = [];
+
+  if (range === "Today") {
+    bucketLabels.push("12 AM", "4 AM", "8 AM", "12 PM", "4 PM", "8 PM", "Now");
+  } else if (range === "7 Days") {
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(today);
+      date.setDate(today.getDate() - i);
+      bucketLabels.push(date.toLocaleDateString([], { weekday: "short" }));
+    }
+  } else {
+    for (let i = 0; i < bucketCount; i++) {
+      const startOffset = 29 - Math.floor((i * 30) / bucketCount);
+      const endOffset = 29 - Math.floor(((i + 1) * 30) / bucketCount) + 1;
+      const startDate = new Date(today);
+      const endDate = new Date(today);
+      startDate.setDate(today.getDate() - startOffset);
+      endDate.setDate(today.getDate() - endOffset);
+      const startLabel = startDate.toLocaleDateString([], { month: "short", day: "numeric" });
+      const endLabel = endDate.toLocaleDateString([], { month: "short", day: "numeric" });
+      bucketLabels.push(startLabel === endLabel ? startLabel : `${startLabel}–${endLabel}`);
+    }
+  }
+
+  records.forEach((record) => {
+    if (record.status !== "Successful") return;
+    const recordDate = parseLocalDate(record.date);
+    const age = Math.floor((today.getTime() - recordDate.getTime()) / 86400000);
+    let index = -1;
+
+    if (range === "Today") {
+      if (age !== 0) return;
+      const hour = Number(record.time.split(":")[0]);
+      index = Math.min(6, Math.floor(hour / 4));
+    } else if (range === "7 Days") {
+      if (age < 0 || age >= 7) return;
+      index = 6 - age;
+    } else {
+      if (age < 0 || age >= 30) return;
+      index = Math.min(6, Math.floor(((29 - age) / 30) * 7));
+    }
+
+    if (index >= 0) {
+      buckets[index][record.type === "Food" ? "food" : "water"] += Math.max(0, record.amount);
+    }
+  });
+
+  const food = buckets.map((bucket) => bucket.food);
+  const water = buckets.map((bucket) => bucket.water);
+  const maxValue = Math.max(10, ...food, ...water);
+  const axisMax = Math.ceil(maxValue / 10) * 10;
+  const plotTop = 55;
+  const plotBottom = 230;
+  const plotHeight = plotBottom - plotTop;
+  const yFor = (value: number) => plotBottom - (value / axisMax) * plotHeight;
+  const xFor = (index: number) => 60 + index * 92;
+  const toPoints = (values: number[]) => values.map((value, index) => `${xFor(index)},${yFor(value)}`).join(" ");
+  const ticks = [0, 1, 2, 3, 4].map((step) => (axisMax * step) / 4);
 
   return (
     <div className="chart-wrap">
-      <div className="y-label">Consumption (g / ml)</div>
+      <div className="y-label">Dispensed weight (g)</div>
       <svg
         className="large-chart"
         viewBox="0 0 660 270"
         role="img"
-        aria-label={`${mode} chart of sample food and water consumption`}
+        aria-label={`${mode} chart showing successful food and water dispensing in grams for ${range.toLowerCase()}`}
       >
-        {[55, 100, 145, 190, 235].map((y, i) => (
-          <g key={y}>
-            <line x1="52" y1={y} x2="635" y2={y} className="grid-line" />
-            <text x="41" y={y + 4} textAnchor="end">
-              {100 - i * 25}
-            </text>
-          </g>
-        ))}
+        {ticks.map((value, index) => {
+          const y = yFor(value);
+          return (
+            <g key={index}>
+              <line x1="52" y1={y} x2="635" y2={y} className="grid-line" />
+              <text x="41" y={y + 4} textAnchor="end">{Math.round(value)}</text>
+            </g>
+          );
+        })}
         {mode === "Line" ? (
           <>
             <polyline points={toPoints(food)} className="line food-line" />
             <polyline points={toPoints(water)} className="line water-line" />
-            {food.map((v, i) => (
-              <circle
-                key={`f${i}`}
-                cx={60 + i * 92}
-                cy={230 - v * 1.75}
-                r="4"
-                className="food-dot"
-              />
+            {food.map((value, index) => (
+              <circle key={`food-${index}`} cx={xFor(index)} cy={yFor(value)} r="4" className="food-dot" />
             ))}
-            {water.map((v, i) => (
-              <circle
-                key={`w${i}`}
-                cx={60 + i * 92}
-                cy={230 - v * 1.75}
-                r="4"
-                className="water-dot"
-              />
+            {water.map((value, index) => (
+              <circle key={`water-${index}`} cx={xFor(index)} cy={yFor(value)} r="4" className="water-dot" />
             ))}
           </>
         ) : (
           <>
-            {food.map((v, i) => (
-              <rect
-                key={`f${i}`}
-                x={48 + i * 92}
-                y={230 - v * 1.75}
-                width="22"
-                height={v * 1.75}
-                rx="4"
-                className="food-bar"
-              />
+            {food.map((value, index) => (
+              <rect key={`food-${index}`} x={xFor(index) - 23} y={yFor(value)} width="22" height={plotBottom - yFor(value)} rx="4" className="food-bar" />
             ))}
-            {water.map((v, i) => (
-              <rect
-                key={`w${i}`}
-                x={72 + i * 92}
-                y={230 - v * 1.75}
-                width="22"
-                height={v * 1.75}
-                rx="4"
-                className="water-bar"
-              />
+            {water.map((value, index) => (
+              <rect key={`water-${index}`} x={xFor(index) + 1} y={yFor(value)} width="22" height={plotBottom - yFor(value)} rx="4" className="water-bar" />
             ))}
           </>
         )}
-        {labels.map((label, i) => (
-          <text key={label} x={60 + i * 92} y="258" textAnchor="middle" className="axis-label">
+        {bucketLabels.map((label, index) => (
+          <text key={`${label}-${index}`} x={xFor(index)} y="258" textAnchor="middle" className="axis-label">
             {label}
           </text>
         ))}
@@ -529,17 +567,23 @@ function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [mobileNav, setMobileNav] = useState(false);
   const [now, setNow] = useState(new Date());
-  const [schedules, setSchedules] = useState(initialSchedules);
-  const [alerts, setAlerts] = useState(initialAlerts);
-  const [amount, setAmount] = useState(85);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedulesLoading, setSchedulesLoading] = useState(true);
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [sensor, setSensor] = useState<SensorReading | null>(null);
+  const [deviceStatus, setDeviceStatus] = useState<DeviceStatus | null>(null);
+  const [dataLoading, setDataLoading] = useState(true);
+  const [amount, setAmount] = useState("85");
   const [savedAmount, setSavedAmount] = useState(85);
+  const [manualDispensing, setManualDispensing] = useState(false);
+  const [historyEntries, setHistoryEntries] = useState<HistoryRecord[]>([]);
   const [toast, setToast] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formName, setFormName] = useState("");
   const [formTime, setFormTime] = useState("08:00");
   const [formType, setFormType] = useState<ScheduleType>("Food & water");
-  const [formAmount, setFormAmount] = useState(85);
+  const [formAmount, setFormAmount] = useState("85");
   const [formRecurrence, setFormRecurrence] = useState<Recurrence>("Every Day");
   const [formDays, setFormDays] = useState<DayName[]>([
     "Mon",
@@ -558,7 +602,7 @@ function App() {
   const [alertFilter, setAlertFilter] = useState<"All" | "Unread" | "Supply" | "Device">("All");
   const [historyRange, setHistoryRange] = useState<
     "Today" | "Last 7 Days" | "Last 30 Days" | "Custom"
-  >("Last 7 Days");
+  >("Last 30 Days");
   const [historyType, setHistoryType] = useState<"All" | "Food" | "Water">("All");
   const [historyStatus, setHistoryStatus] = useState<"All" | "Successful" | "Failed">("All");
   const [historySearch, setHistorySearch] = useState("");
@@ -576,6 +620,85 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  useEffect(() => {
+    const loadSchedules = async () => {
+      setSchedulesLoading(true);
+
+      const { data, error } = await supabase
+        .from("pet_schedules")
+        .select("*")
+        .order("time", { ascending: true });
+
+      if (error) {
+        console.error("Error loading schedules:", error.message);
+        setToast("Unable to load schedules");
+        setSchedulesLoading(false);
+        return;
+      }
+
+      const formattedSchedules: Schedule[] = (data ?? []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        time: item.time.slice(0, 5),
+        type: item.type as ScheduleType,
+        amount: Number(item.amount),
+        enabled: item.enabled,
+        recurrence: item.recurrence as Recurrence,
+        days: item.days as DayName[],
+        startDate: item.start_date,
+        endDate: item.end_date ?? "",
+      }));
+
+      setSchedules(formattedSchedules);
+      setSchedulesLoading(false);
+    };
+
+    loadSchedules();
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const loadLiveData = async () => {
+      const [sensorResult, statusResult, historyResult, alertResult] = await Promise.all([
+        supabase.from("sensor_readings").select("food_weight,water_weight,food_level,water_level,temperature,humidity,created_at").order("created_at", { ascending: false }).limit(1),
+        supabase.from("device_status").select("is_online,last_seen").eq("device_name", "PetWatch").order("last_seen", { ascending: false }).limit(1),
+        supabase.from("feeding_history").select("id,source,target_weight_g,dispensed_weight_g,status,details,created_at").order("created_at", { ascending: false }).limit(300),
+        supabase.from("alerts").select("id,alert_type,message,is_read,created_at").order("created_at", { ascending: false }).limit(100),
+      ]);
+      if (!active) return;
+      if (sensorResult.error) console.error("Sensor readings:", sensorResult.error.message);
+      else setSensor((sensorResult.data?.[0] as SensorReading | undefined) ?? null);
+      if (statusResult.error) console.error("Device status:", statusResult.error.message);
+      else {
+        const row = statusResult.data?.[0];
+        setDeviceStatus(row ? { is_online: Boolean(row.is_online), last_seen: row.last_seen ?? null } : null);
+      }
+      if (historyResult.error) console.error("Feeding history:", historyResult.error.message);
+      else setHistoryEntries((historyResult.data ?? []).map((row: any): HistoryRecord => {
+        const detail = String(row.details ?? "");
+        const isWater = /water/i.test(detail);
+        const created = new Date(row.created_at);
+        return {
+          id: Number(row.id), date: dateInputValue(0).replace(dateInputValue(0), `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, "0")}-${String(created.getDate()).padStart(2, "0")}`),
+          time: `${String(created.getHours()).padStart(2, "0")}:${String(created.getMinutes()).padStart(2, "0")}`,
+          type: isWater ? "Water" : "Food", amount: Number(row.dispensed_weight_g ?? 0), unit: "g",
+          status: row.status === "completed" ? "Successful" : "Failed", schedule: row.source === "schedule" ? "Scheduled routine" : "Manual dispensing",
+          method: row.source === "schedule" ? "Automatic" : "Manual",
+        };
+      }));
+      if (alertResult.error) console.error("Alerts:", alertResult.error.message);
+      else setAlerts((alertResult.data ?? []).map((row: any): AlertItem => {
+        const type = String(row.alert_type ?? "");
+        const category: AlertItem["category"] = type.includes("food") || type.includes("water") ? "Supply" : type.includes("feeding") || type.includes("schedule") ? "Schedule" : "Device";
+        const level: AlertItem["level"] = /low|high|failed/i.test(type) ? "Attention" : "Notice";
+        return { id: Number(row.id), title: type.replaceAll("_", " ").replace(/\b\w/g, c => c.toUpperCase()), detail: row.message, time: new Date(row.created_at).toLocaleString(), category, level, unread: !row.is_read };
+      }));
+      setDataLoading(false);
+    };
+    loadLiveData();
+    const timer = window.setInterval(loadLiveData, 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, []);
+
   const navigate = (next: Page) => {
     setPage(next);
     setMobileNav(false);
@@ -587,7 +710,7 @@ function App() {
     setFormName("");
     setFormTime("08:00");
     setFormType("Food & water");
-    setFormAmount(savedAmount);
+    setFormAmount(String(savedAmount));
     setFormRecurrence("Every Day");
     setFormDays(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);
     setFormStartDate(dateInputValue(0));
@@ -601,7 +724,7 @@ function App() {
     setFormName(schedule.name);
     setFormTime(schedule.time);
     setFormType(schedule.type);
-    setFormAmount(schedule.amount || savedAmount);
+    setFormAmount(String(schedule.amount || savedAmount));
     setFormRecurrence(schedule.recurrence);
     setFormDays(schedule.days);
     setFormStartDate(schedule.startDate);
@@ -624,74 +747,155 @@ function App() {
     setFormError("");
   };
 
-  const saveSchedule = () => {
+  const saveSchedule = async () => {
+    const parsedFoodAmount = Number(formAmount);
+
     if (!formTime) {
       setFormError("Choose a feeding time.");
       return;
     }
+
     if (!formStartDate) {
       setFormError("Choose a start date.");
       return;
     }
+
     if (formEndDate && formEndDate < formStartDate) {
       setFormError("End date must be on or after the start date.");
       return;
     }
+
     if (formRecurrence !== "Once" && formDays.length === 0) {
       setFormError("Select at least one day for this recurring schedule.");
       return;
     }
-    if (formType !== "Water" && (formAmount < 20 || formAmount > 150)) {
+
+    if (
+      formType !== "Water" &&
+      (!formAmount ||
+        !Number.isFinite(parsedFoodAmount) ||
+        parsedFoodAmount < 20 ||
+        parsedFoodAmount > 150)
+    ) {
       setFormError("Food amount must be between 20 g and 150 g.");
       return;
     }
-    if (editingId) {
-      setSchedules((items) =>
-        items.map((item) =>
-          item.id === editingId
-            ? {
-                ...item,
-                name: formName.trim() || `${formType} routine`,
-                time: formTime,
-                type: formType,
-                amount: formType === "Water" ? 0 : formAmount,
-                recurrence: formRecurrence,
-                days: formRecurrence === "Once" ? [] : formDays,
-                startDate: formStartDate,
-                endDate: formEndDate,
-              }
-            : item,
-        ),
-      );
-      setToast("Schedule updated");
+
+    const scheduleData = {
+      name: formName.trim() || `${formType} routine`,
+      time: formTime,
+      type: formType,
+      amount: formType === "Water" ? 0 : parsedFoodAmount,
+      enabled: true,
+      recurrence: formRecurrence,
+      days: formRecurrence === "Once" ? [] : formDays,
+      start_date: formStartDate,
+      end_date: formEndDate || null,
+    };
+
+    let error;
+
+    if (editingId !== null) {
+      const result = await supabase
+        .from("pet_schedules")
+        .update(scheduleData)
+        .eq("id", editingId);
+
+      error = result.error;
     } else {
-      setSchedules((items) =>
-        [
-          ...items,
-          {
-            id: Date.now(),
-            name: formName.trim() || `${formType} routine`,
-            time: formTime,
-            type: formType,
-            amount: formType === "Water" ? 0 : formAmount,
-            enabled: true,
-            recurrence: formRecurrence,
-            days: formRecurrence === "Once" ? [] : formDays,
-            startDate: formStartDate,
-            endDate: formEndDate,
-          },
-        ].sort((a, b) => a.time.localeCompare(b.time)),
-      );
-      setToast("New schedule saved");
+      const result = await supabase
+        .from("pet_schedules")
+        .insert(scheduleData);
+
+      error = result.error;
     }
+
+    if (error) {
+      console.error("Error saving schedule:", error.message);
+      setFormError("Could not save schedule. Please try again.");
+      return;
+    }
+
+    // Reload schedules from Supabase after saving.
+    const { data, error: loadError } = await supabase
+      .from("pet_schedules")
+      .select("*")
+      .order("time", { ascending: true });
+
+    if (loadError) {
+      console.error("Error refreshing schedules:", loadError.message);
+      setToast("Saved, but could not refresh the schedule list");
+      setEditorOpen(false);
+      return;
+    }
+
+    setSchedules(
+      (data ?? []).map((item) => ({
+        id: item.id,
+        name: item.name,
+        time: item.time.slice(0, 5),
+        type: item.type as ScheduleType,
+        amount: Number(item.amount),
+        enabled: item.enabled,
+        recurrence: item.recurrence as Recurrence,
+        days: item.days as DayName[],
+        startDate: item.start_date,
+        endDate: item.end_date ?? "",
+      })),
+    );
+
     setEditorOpen(false);
+    setToast(editingId !== null ? "Schedule updated successfully" : "Schedule saved successfully");
   };
 
   const applyAmount = () => {
-    setSavedAmount(amount);
-    setToast(`Food amount set to ${amount} g`);
+    const parsedAmount = Number(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount < 20 || parsedAmount > 150) {
+      const boundedAmount = Number.isFinite(parsedAmount) ? parsedAmount : 20;
+      setAmount(String(Math.min(150, Math.max(20, boundedAmount))));
+      setToast("Food amount must be between 20 g and 150 g");
+      return;
+    }
+    setSavedAmount(parsedAmount);
+    setToast(`Food amount set to ${parsedAmount} g`);
   };
 
+  const dispenseManually = async () => {
+    if (manualDispensing) return;
+
+    setManualDispensing(true);
+
+    // Each command asks the ESP32 to fill its own bowl/container
+    // until its measured total reaches 100 g.
+    const { error } = await supabase.from("device_commands").insert([
+      {
+        command: "feed_to_capacity",
+        target_weight_g: 100,
+        status: "pending",
+      },
+      {
+        command: "water_to_capacity",
+        target_weight_g: 100,
+        status: "pending",
+      },
+    ]);
+
+    setManualDispensing(false);
+
+    if (error) {
+      console.error("Unable to queue manual dispensing:", error.message);
+      setToast(`Could not send dispensing request: ${error.message}`);
+      return;
+    }
+
+    // The ESP32 should record the actual measured result after dispensing.
+    setToast("Food and water dispensing requests sent to PetWatch");
+  };
+
+  const deviceIsOnline = Boolean(
+    deviceStatus?.is_online && deviceStatus.last_seen &&
+    Date.now() - new Date(deviceStatus.last_seen).getTime() < 30000
+  );
   const unreadCount = alerts.filter((alert) => alert.unread).length;
   const filteredAlerts = useMemo(
     () =>
@@ -706,7 +910,7 @@ function App() {
   const filteredHistory = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    return historyRecords.filter((record) => {
+    return historyEntries.filter((record) => {
       const recordDate = parseLocalDate(record.date);
       const age = Math.floor((today.getTime() - recordDate.getTime()) / 86400000);
       const inRange =
@@ -722,12 +926,61 @@ function App() {
       const query = historySearch.trim().toLowerCase();
       const matchesSearch =
         !query ||
-        record.schedule.toLowerCase().includes(query) ||
-        record.type.toLowerCase().includes(query) ||
-        record.status.toLowerCase().includes(query);
+        [
+          record.date,
+          formatHistoryDate(record.date),
+          record.time,
+          record.type,
+          `${record.amount} ${record.unit}`,
+          record.status === "Failed" ? "Not dispensed" : "",
+          record.schedule,
+          record.status,
+          record.method ?? "Automatic",
+        ].some((field) => field.toLowerCase().includes(query));
       return inRange && matchesType && matchesStatus && matchesSearch;
     });
-  }, [historyRange, historyType, historyStatus, historySearch, customFrom, customTo]);
+  }, [historyEntries, historyRange, historyType, historyStatus, historySearch, customFrom, customTo]);
+
+  const nextFeeding = useMemo(() => {
+    const upcoming = schedules
+      .filter((schedule) => schedule.enabled)
+      .map((schedule) => ({ schedule, occurrence: getNextOccurrence(schedule, now) }))
+      .filter((item): item is { schedule: Schedule; occurrence: Date } => item.occurrence !== null)
+      .sort((a, b) => a.occurrence.getTime() - b.occurrence.getTime())[0];
+
+    if (!upcoming) return null;
+    const isToday = upcoming.occurrence.toDateString() === now.toDateString();
+    const isTomorrow = (() => {
+      const tomorrow = new Date(now);
+      tomorrow.setDate(now.getDate() + 1);
+      return upcoming.occurrence.toDateString() === tomorrow.toDateString();
+    })();
+    const label = isToday ? "Today" : isTomorrow ? "Tomorrow" : upcoming.occurrence.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+    return { schedule: upcoming.schedule, label };
+  }, [schedules, now]);
+
+  const weeklySummary = useMemo(() => {
+    const today = new Date(now);
+    today.setHours(0, 0, 0, 0);
+    const weekStart = new Date(today);
+    const day = (weekStart.getDay() + 6) % 7; // Monday is the first day of the week.
+    weekStart.setDate(weekStart.getDate() - day);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 7);
+    const records = historyEntries.filter((record) => {
+      const date = parseLocalDate(record.date);
+      return date >= weekStart && date < weekEnd && record.status === "Successful";
+    });
+    return {
+      food: records.filter((record) => record.type === "Food").reduce((sum, record) => sum + record.amount, 0),
+      water: records.filter((record) => record.type === "Water").reduce((sum, record) => sum + record.amount, 0),
+      completed: records.filter((record) => record.type === "Food").length,
+    };
+  }, [historyEntries, now]);
+
+  const todayHistory = historyEntries.filter((record) => record.date === dateInputValue(0) && record.status === "Successful");
+  const todayFoodTotal = todayHistory.filter((record) => record.type === "Food").reduce((sum, record) => sum + record.amount, 0);
+  const todayWaterTotal = todayHistory.filter((record) => record.type === "Water").reduce((sum, record) => sum + record.amount, 0);
 
   const historySummary = useMemo(
     () => ({
@@ -742,6 +995,55 @@ function App() {
     }),
     [filteredHistory],
   );
+
+
+  const markAlertAsRead = async (alertId: number) => {
+    const { data, error } = await supabase
+      .from("alerts")
+      .update({ is_read: true })
+      .eq("id", alertId)
+      .select("id");
+
+    if (error) {
+      console.error("Error marking alert as read:", error.message);
+      setToast("Unable to mark alert as read. Please try again.");
+      return;
+    }
+
+    if (!data || data.length === 0) {
+      console.error("No alert was updated. Check Supabase RLS policies and alert ID.");
+      setToast("Alert was not updated. Check database permissions.");
+      return;
+    }
+
+    setAlerts((items) =>
+      items.map((item) =>
+        item.id === alertId ? { ...item, unread: false } : item
+      )
+    );
+
+    setToast("Alert marked as read");
+  };
+
+  const markAllAlertsAsRead = async () => {
+    const { data, error } = await supabase
+      .from("alerts")
+      .update({ is_read: true })
+      .eq("is_read", false)
+      .select("id");
+
+    if (error) {
+      console.error("Error marking all alerts as read:", error.message);
+      setToast("Unable to update alerts. Please try again.");
+      return;
+    }
+
+    setAlerts((items) =>
+      items.map((item) => ({ ...item, unread: false }))
+    );
+
+    setToast(`${data?.length ?? 0} alerts marked as read`);
+  };
 
   const headerTitle =
     page === "dashboard"
@@ -766,6 +1068,7 @@ function App() {
 
   return (
     <div className="app-shell">
+
       <aside className={`sidebar ${mobileNav ? "mobile-open" : ""}`}>
         <div className="brand">
           <BrandMark />
@@ -803,11 +1106,11 @@ function App() {
               <div>
                 <strong>Kitchen feeder</strong>
                 <span>
-                  <i /> Online · Sample
+                  <i /> {deviceStatus?.is_online ? "Online" : "Offline / Unknown"}
                 </span>
               </div>
             </div>
-            <button onClick={() => setToast("Device details are sample data")}>
+            <button onClick={() => setToast(deviceStatus?.last_seen ? `Last seen: ${new Date(deviceStatus.last_seen).toLocaleString()}` : "No device heartbeat has been recorded yet")}>
               Device details <Icon name="chevron" size={15} />
             </button>
           </div>
@@ -836,7 +1139,7 @@ function App() {
           </div>
           <div className="topbar-actions">
             <span className="sample-pill">
-              <Icon name="info" size={15} /> Illustrative sample data
+              <Icon name="info" size={15} /> {dataLoading ? "Connecting to Supabase…" : deviceIsOnline ? "Device connected" : "Device offline"}
             </span>
             <button
               className="notification-button"
@@ -856,11 +1159,16 @@ function App() {
               <div>
                 <span className="eyebrow">Next feeding</span>
                 <div className="next-time">
-                  <span>1:00</span> PM
+                  {nextFeeding ? (
+                    <><span>{formatTime(nextFeeding.schedule.time)}</span></>
+                  ) : (
+                    <span>—</span>
+                  )}
                 </div>
                 <p>
-                  <Icon name="bowl" size={18} /> Food · 55 g
+                  <Icon name="bowl" size={18} /> {nextFeeding ? `${nextFeeding.schedule.name} · ${nextFeeding.schedule.type}${nextFeeding.schedule.type === "Food" ? ` · ${nextFeeding.schedule.amount} g` : ""}` : "No upcoming enabled schedule"}
                 </p>
+                {nextFeeding && <small className="hardware-note">{nextFeeding.label}</small>}
                 <button className="text-button" onClick={() => navigate("schedule")}>
                   View schedule <Icon name="chevron" size={16} />
                 </button>
@@ -893,7 +1201,7 @@ function App() {
                     <span className="eyebrow">Device status</span>
                     <h2>Supply levels</h2>
                   </div>
-                  <span className="updated">Updated 2 min ago</span>
+                  <span className="updated">{sensor ? `Updated ${new Date(sensor.created_at).toLocaleTimeString()}` : "Waiting for sensor data"} · {deviceIsOnline ? "Online" : "Offline"}</span>
                 </div>
                 <div className="level-list">
                   <div className="level-item">
@@ -903,12 +1211,12 @@ function App() {
                     <div className="level-copy">
                       <div>
                         <strong>Food</strong>
-                        <span>18%</span>
+                        <span>{sensor?.food_level == null ? "—" : `${Math.round(sensor.food_level)}%`}</span>
                       </div>
                       <div className="progress">
-                        <span style={{ width: "18%" }} />
+                        <span style={{ width: `${Math.max(0, Math.min(100, sensor?.food_level ?? 0))}%` }} />
                       </div>
-                      <small>Low · about 2 servings left</small>
+                      <small>{sensor?.food_weight == null ? "No weight reading" : `${Number(sensor.food_weight).toFixed(1)} g measured`}</small>
                     </div>
                   </div>
                   <div className="level-item">
@@ -918,15 +1226,57 @@ function App() {
                     <div className="level-copy">
                       <div>
                         <strong>Water</strong>
-                        <span>64%</span>
+                        <span>{sensor?.water_level == null ? "—" : `${Math.round(sensor.water_level)}%`}</span>
                       </div>
                       <div className="progress water-progress">
-                        <span style={{ width: "64%" }} />
+                        <span style={{ width: `${Math.max(0, Math.min(100, sensor?.water_level ?? 0))}%` }} />
                       </div>
-                      <small>Good · approximately 820 ml</small>
+                      <small>{sensor?.water_weight == null ? "No weight reading" : `${Number(sensor.water_weight).toFixed(1)} g measured`}</small>
                     </div>
                   </div>
                 </div>
+              </section>
+
+              <section className="card temperature-card">
+                <div className="section-heading">
+                  <div>
+                    <span className="eyebrow">Food storage</span>
+                    <h2>Temperature monitor</h2>
+                  </div>
+                  <span className="temperature-status">{sensor?.temperature == null ? "No data" : sensor.temperature >= 35 ? "High" : "Monitoring"}</span>
+                </div>
+                <div className="temperature-reading">
+                  <span className="metric-icon neutral">
+                    <Icon name="thermometer" />
+                  </span>
+                  <strong>
+                    {sensor?.temperature == null ? "—" : Number(sensor.temperature).toFixed(1)}<small>°C</small>
+                  </strong>
+                </div>
+                <div className="temperature-track" aria-hidden="true">
+                  <span />
+                </div>
+                <p>{sensor?.humidity == null ? "Humidity: waiting for sensor data" : `Humidity: ${Number(sensor.humidity).toFixed(1)}%`} · Temperature from DHT22</p>
+              </section>
+
+              <section className="card manual-dispense-card">
+                <span className="metric-icon food">
+                  <Icon name="bowl" />
+                </span>
+                <span className="eyebrow">Manual control</span>
+                <h2>Fill food &amp; water</h2>
+                <p>
+                  Dispense both until each bowl/container reaches a total measured weight of
+                  100 g. Each operation stops independently at its limit.
+                </p>
+                <button
+                  className="primary-button full"
+                  onClick={dispenseManually}
+                  disabled={manualDispensing}
+                >
+                  <Icon name="plus" size={17} />
+                  {manualDispensing ? "Sending request..." : "Dispense food & water"}
+                </button>
               </section>
 
               <section className="card daily-card">
@@ -944,16 +1294,16 @@ function App() {
                     <div>
                       <span>Food</span>
                       <strong>
-                        140 <small>g</small>
+                        {todayFoodTotal.toFixed(0)} <small>g</small>
                       </strong>
-                      <em>of 225 g planned</em>
+                      <em>Recorded today</em>
                     </div>
                     <div>
                       <span>Water</span>
                       <strong>
-                        480 <small>ml</small>
+                        {todayWaterTotal.toFixed(0)} <small>g</small>
                       </strong>
-                      <em>Daily total</em>
+                      <em>Measured water dispensed</em>
                     </div>
                   </div>
                   <MiniChart />
@@ -1015,12 +1365,10 @@ function App() {
                     <button
                       key={alert.id}
                       className="alert-preview"
-                      onClick={() => {
-                        setAlerts((items) =>
-                          items.map((item) =>
-                            item.id === alert.id ? { ...item, unread: false } : item,
-                          ),
-                        );
+                      onClick={async () => {
+                        if (alert.unread) {
+                          await markAlertAsRead(alert.id);
+                        }
                         navigate("alerts");
                       }}
                     >
@@ -1058,7 +1406,7 @@ function App() {
               <div className="sample-note">
                 <Icon name="info" size={17} />
                 <span>
-                  Schedules below are sample configurations and do not control connected hardware.
+                  Schedules are saved in Supabase. Automatic execution will work after the ESP32 firmware is updated to read this pet_schedules table and apply its recurrence rules.
                 </span>
               </div>
               <button className="primary-button" onClick={openNewSchedule}>
@@ -1077,56 +1425,93 @@ function App() {
                   </span>
                 </div>
                 <div className="schedule-list">
-                  {schedules.map((schedule) => (
-                    <div
-                      className={`schedule-row ${!schedule.enabled ? "disabled" : ""}`}
-                      key={schedule.id}
-                    >
-                      <div className="schedule-clock">
-                        <Icon name="clock" />
-                        <strong>{formatTime(schedule.time)}</strong>
-                      </div>
-                      <div className="schedule-details">
-                        <strong>{schedule.name}</strong>
-                        <span>
-                          {schedule.type}
-                          {schedule.type !== "Water" ? ` · ${schedule.amount} g` : ""}
+                  {schedulesLoading ? (
+                    <p>Loading schedules...</p>
+                  ) : schedules.length === 0 ? (
+                    <p>No schedules saved yet. Click "Add schedule" to create one.</p>
+                  ) : (
+                    schedules.map((schedule) => (
+                      <div
+                        className={`schedule-row ${!schedule.enabled ? "disabled" : ""}`}
+                        key={schedule.id}
+                      >
+                        <div className="schedule-clock">
+                          <Icon name="clock" />
+                          <strong>{formatTime(schedule.time)}</strong>
+                        </div>
+                        <div className="schedule-details">
+                          <strong>{schedule.name}</strong>
+                          <span>
+                            {schedule.type}
+                            {schedule.type !== "Water" ? ` · ${schedule.amount} g` : ""}
+                          </span>
+                          <em>{formatRecurrence(schedule)}</em>
+                        </div>
+                        <span className="run-time">
+                          {schedule.enabled ? `Next · ${getNextRun(schedule)}` : "Paused"}
                         </span>
-                        <em>{formatRecurrence(schedule)}</em>
+                        <Toggle
+                          checked={schedule.enabled}
+                          onChange={async () => {
+                            const newEnabled = !schedule.enabled;
+
+                            const { error } = await supabase
+                              .from("pet_schedules")
+                              .update({ enabled: newEnabled })
+                              .eq("id", schedule.id);
+
+                            if (error) {
+                              console.error("Error updating schedule:", error.message);
+                              setToast("Unable to update schedule");
+                              return;
+                            }
+
+                            setSchedules((items) =>
+                              items.map((item) =>
+                                item.id === schedule.id
+                                  ? { ...item, enabled: newEnabled }
+                                  : item,
+                              ),
+                            );
+
+                            setToast(newEnabled ? "Schedule enabled" : "Schedule paused");
+                          }}
+                          label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.name} schedule`}
+                        />
+                        <button
+                          className="row-action"
+                          onClick={() => openEditSchedule(schedule)}
+                          aria-label={`Edit ${schedule.name} schedule`}
+                        >
+                          <Icon name="edit" size={18} />
+                        </button>
+                        <button
+                          className="row-action delete"
+                          onClick={async () => {
+                            const { error } = await supabase
+                              .from("pet_schedules")
+                              .delete()
+                              .eq("id", schedule.id);
+
+                            if (error) {
+                              console.error("Error deleting schedule:", error.message);
+                              setToast("Unable to delete schedule");
+                              return;
+                            }
+
+                            setSchedules((items) =>
+                              items.filter((item) => item.id !== schedule.id),
+                            );
+
+                            setToast("Schedule deleted successfully");
+                          }}
+                          aria-label={`Delete ${schedule.name} schedule`}
+                        >
+                          <Icon name="trash" size={18} />
+                        </button>
                       </div>
-                      <span className="run-time">
-                        {schedule.enabled ? `Next · ${getNextRun(schedule)}` : "Paused"}
-                      </span>
-                      <Toggle
-                        checked={schedule.enabled}
-                        onChange={() =>
-                          setSchedules((items) =>
-                            items.map((item) =>
-                              item.id === schedule.id ? { ...item, enabled: !item.enabled } : item,
-                            ),
-                          )
-                        }
-                        label={`${schedule.enabled ? "Disable" : "Enable"} ${schedule.name} schedule`}
-                      />
-                      <button
-                        className="row-action"
-                        onClick={() => openEditSchedule(schedule)}
-                        aria-label={`Edit ${schedule.name} schedule`}
-                      >
-                        <Icon name="edit" size={18} />
-                      </button>
-                      <button
-                        className="row-action delete"
-                        onClick={() => {
-                          setSchedules((items) => items.filter((item) => item.id !== schedule.id));
-                          setToast("Schedule deleted");
-                        }}
-                        aria-label={`Delete ${schedule.name} schedule`}
-                      >
-                        <Icon name="trash" size={18} />
-                      </button>
-                    </div>
-                  ))}
+                    )
+                    ))}
                 </div>
               </section>
 
@@ -1144,7 +1529,7 @@ function App() {
                 <label htmlFor="food-amount">Editable amount</label>
                 <div className="stepper">
                   <button
-                    onClick={() => setAmount(Math.max(20, amount - 5))}
+                    onClick={() => setAmount(String(Math.max(20, (Number(amount) || 20) - 5)))}
                     aria-label="Decrease by 5 grams"
                   >
                     −
@@ -1155,16 +1540,21 @@ function App() {
                       type="number"
                       min="20"
                       max="150"
-                      step="5"
+                      step="1"
                       value={amount}
-                      onChange={(event) =>
-                        setAmount(Math.min(150, Math.max(20, Number(event.target.value))))
-                      }
+                      onChange={(event) => setAmount(event.target.value)}
+                      onBlur={() => {
+                        if (!amount) return;
+                        const parsedAmount = Number(amount);
+                        if (Number.isFinite(parsedAmount)) {
+                          setAmount(String(Math.min(150, Math.max(20, parsedAmount))));
+                        }
+                      }}
                     />
                     <span>g</span>
                   </div>
                   <button
-                    onClick={() => setAmount(Math.min(150, amount + 5))}
+                    onClick={() => setAmount(String(Math.min(150, (Number(amount) || 20) + 5)))}
                     aria-label="Increase by 5 grams"
                   >
                     +
@@ -1176,8 +1566,8 @@ function App() {
                   min="20"
                   max="150"
                   step="5"
-                  value={amount}
-                  onChange={(event) => setAmount(Number(event.target.value))}
+                  value={Math.min(150, Math.max(20, Number(amount) || 20))}
+                  onChange={(event) => setAmount(event.target.value)}
                   aria-label="Food amount in grams"
                 />
                 <div className="range-labels">
@@ -1187,7 +1577,7 @@ function App() {
                 <button
                   className="primary-button full"
                   onClick={applyAmount}
-                  disabled={amount === savedAmount}
+                  disabled={Number(amount) === savedAmount}
                 >
                   Apply amount
                 </button>
@@ -1209,9 +1599,9 @@ function App() {
                 <div>
                   <span>Food this week</span>
                   <strong>
-                    562 <small>g</small>
+                    {weeklySummary.food.toFixed(1)} <small>g</small>
                   </strong>
-                  <em>4% less than last week</em>
+                  <em>Measured successful food dispensing</em>
                 </div>
               </div>
               <div className="summary-card">
@@ -1221,9 +1611,9 @@ function App() {
                 <div>
                   <span>Water this week</span>
                   <strong>
-                    3.2 <small>L</small>
+                    {weeklySummary.water.toFixed(1)} <small>g</small>
                   </strong>
-                  <em>8% more than last week</em>
+                  <em>Measured successful water dispensing</em>
                 </div>
               </div>
               <div className="summary-card">
@@ -1233,9 +1623,9 @@ function App() {
                 <div>
                   <span>Completed feedings</span>
                   <strong>
-                    18 <small>/ 21</small>
+                    {weeklySummary.completed} <small>this week</small>
                   </strong>
-                  <em>86% schedule completion</em>
+                  <em>Successful food dispensing records</em>
                 </div>
               </div>
             </div>
@@ -1244,7 +1634,7 @@ function App() {
                 <div>
                   <span className="eyebrow">History</span>
                   <h2>Food & water consumption</h2>
-                  <p>Illustrative sample data</p>
+                  <p>Dispensing records from Supabase</p>
                 </div>
                 <div className="chart-controls">
                   <div className="segment-control" aria-label="Date range">
@@ -1276,13 +1666,12 @@ function App() {
                   <i className="legend-food" /> Food (g)
                 </span>
                 <span>
-                  <i className="legend-water" /> Water (ml)
+                  <i className="legend-water" /> Water (g)
                 </span>
               </div>
-              <ConsumptionChart mode={chartMode} range={dateRange} />
+              <ConsumptionChart mode={chartMode} range={dateRange} records={historyEntries} />
               <p className="chart-footnote">
-                <Icon name="info" size={15} /> Values are sample readings for interface
-                demonstration.
+                <Icon name="info" size={15} /> Aggregated from successful Supabase dispensing records. Both food and water are measured in grams by their load cells.
               </p>
             </section>
           </div>
@@ -1338,14 +1727,17 @@ function App() {
                 <div>
                   <span className="eyebrow">Activity log</span>
                   <h2>Dispensing records</h2>
-                  <p>Newest activity is shown first · Illustrative sample data</p>
+                  <p>Newest activity is shown first · Live records from Supabase</p>
                 </div>
                 <div className="history-search">
                   <Icon name="search" size={17} />
                   <input
-                    type="search"
+                    type="text"
+                    role="searchbox"
+                    inputMode="search"
                     aria-label="Search dispensing history"
-                    placeholder="Search schedule or status"
+                    placeholder="Search date, amount, schedule or status"
+                    autoComplete="off"
                     value={historySearch}
                     onChange={(event) => setHistorySearch(event.target.value)}
                   />
@@ -1422,22 +1814,22 @@ function App() {
                     <option>Failed</option>
                   </select>
                 </label>
-                {(historyRange !== "Last 7 Days" ||
+                {(historyRange !== "Last 30 Days" ||
                   historyType !== "All" ||
                   historyStatus !== "All" ||
                   historySearch) && (
-                  <button
-                    className="clear-filters"
-                    onClick={() => {
-                      setHistoryRange("Last 7 Days");
-                      setHistoryType("All");
-                      setHistoryStatus("All");
-                      setHistorySearch("");
-                    }}
-                  >
-                    Clear filters
-                  </button>
-                )}
+                    <button
+                      className="clear-filters"
+                      onClick={() => {
+                        setHistoryRange("Last 30 Days");
+                        setHistoryType("All");
+                        setHistoryStatus("All");
+                        setHistorySearch("");
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  )}
               </div>
 
               {filteredHistory.length ? (
@@ -1479,10 +1871,17 @@ function App() {
                             </span>
                           </td>
                           <td data-label="Status">
-                            <span className={`operation-status ${record.status.toLowerCase()}`}>
-                              <i />
-                              {record.status}
-                            </span>
+                            <div className="history-status-cell">
+                              <span className={`operation-status ${record.status.toLowerCase()}`}>
+                                <i />
+                                {record.status}
+                              </span>
+                              <span
+                                className={`dispense-method ${(record.method ?? "Automatic").toLowerCase()}`}
+                              >
+                                {record.method ?? "Automatic"}
+                              </span>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1510,7 +1909,7 @@ function App() {
                 </div>
               )}
               <div className="history-footer">
-                Showing {filteredHistory.length} of {historyRecords.length} sample records
+                Showing {filteredHistory.length} of {historyEntries.length} records
               </div>
             </section>
           </div>
@@ -1534,10 +1933,7 @@ function App() {
               <button
                 className="secondary-button"
                 disabled={unreadCount === 0}
-                onClick={() => {
-                  setAlerts((items) => items.map((item) => ({ ...item, unread: false })));
-                  setToast("All alerts marked as read");
-                }}
+                onClick={markAllAlertsAsRead}
               >
                 <Icon name="check" size={17} /> Mark all as read
               </button>
@@ -1549,7 +1945,7 @@ function App() {
                   <h2>{alertFilter === "All" ? "All alerts" : alertFilter}</h2>
                 </div>
                 <span>
-                  {filteredAlerts.length} sample {filteredAlerts.length === 1 ? "alert" : "alerts"}
+                  {filteredAlerts.length} {filteredAlerts.length === 1 ? "alert" : "alerts"}
                 </span>
               </div>
               {filteredAlerts.length > 0 ? (
@@ -1590,13 +1986,7 @@ function App() {
                       {alert.unread ? (
                         <button
                           className="secondary-button compact"
-                          onClick={() =>
-                            setAlerts((items) =>
-                              items.map((item) =>
-                                item.id === alert.id ? { ...item, unread: false } : item,
-                              ),
-                            )
-                          }
+                          onClick={() => markAlertAsRead(alert.id)}
                         >
                           <Icon name="check" size={16} /> Mark as read
                         </button>
@@ -1614,7 +2004,7 @@ function App() {
                     <Icon name="check" size={26} />
                   </span>
                   <h3>You’re all caught up</h3>
-                  <p>No sample alerts match this filter.</p>
+                  <p>No alerts match this filter.</p>
                   <button className="secondary-button" onClick={() => setAlertFilter("All")}>
                     View all alerts
                   </button>
@@ -1721,7 +2111,7 @@ function App() {
                     max="150"
                     value={formAmount}
                     onChange={(event) => {
-                      setFormAmount(Number(event.target.value));
+                      setFormAmount(event.target.value);
                       setFormError("");
                     }}
                   />
@@ -1885,38 +2275,34 @@ function formatRecurrence(schedule: Schedule) {
   return schedule.recurrence;
 }
 
-function getNextRun(schedule: Schedule) {
-  const now = new Date();
+function getNextOccurrence(schedule: Schedule, reference: Date): Date | null {
   const dayNames: DayName[] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const start = parseLocalDate(schedule.startDate);
   const end = schedule.endDate ? parseLocalDate(schedule.endDate) : null;
   if (end) end.setHours(23, 59, 59, 999);
 
-  for (let offset = 0; offset < 14; offset += 1) {
-    const candidate = new Date(now);
-    candidate.setDate(now.getDate() + offset);
+  for (let offset = 0; offset < 366; offset += 1) {
+    const candidate = new Date(reference);
+    candidate.setDate(reference.getDate() + offset);
     const [hours, minutes] = schedule.time.split(":").map(Number);
     candidate.setHours(hours, minutes, 0, 0);
-    if (candidate < now || candidate < start || (end && candidate > end)) continue;
+    if (candidate < reference || candidate < start || (end && candidate > end)) continue;
     const isStartDate = candidate.toDateString() === start.toDateString();
-    if (
-      (schedule.recurrence === "Once" && isStartDate) ||
-      (schedule.recurrence !== "Once" && schedule.days.includes(dayNames[candidate.getDay()]))
-    ) {
-      const dayLabel =
-        offset === 0
-          ? "Today"
-          : offset === 1
-            ? "Tomorrow"
-            : candidate.toLocaleDateString([], {
-                weekday: "short",
-                month: "short",
-                day: "numeric",
-              });
-      return `${dayLabel}, ${formatTime(schedule.time)}`;
-    }
+    const matchesRecurrence = schedule.recurrence === "Once"
+      ? isStartDate
+      : schedule.days.includes(dayNames[candidate.getDay()]);
+    if (matchesRecurrence) return candidate;
   }
-  return "No upcoming run";
+  return null;
+}
+
+function getNextRun(schedule: Schedule) {
+  const occurrence = getNextOccurrence(schedule, new Date());
+  if (!occurrence) return "No upcoming run";
+  const today = new Date();
+  const offset = Math.round((new Date(occurrence.getFullYear(), occurrence.getMonth(), occurrence.getDate()).getTime() - new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime()) / 86400000);
+  const dayLabel = offset === 0 ? "Today" : offset === 1 ? "Tomorrow" : occurrence.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" });
+  return `${dayLabel}, ${formatTime(schedule.time)}`;
 }
 
 export default App;
