@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
+import type { User } from "@supabase/supabase-js";
 import { supabase } from "./lib/supabase";
 
 type Page = "dashboard" | "schedule" | "consumption" | "history" | "alerts";
@@ -564,6 +566,119 @@ function ConsumptionChart({
 }
 
 function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (error) console.error("Session check failed:", error.message);
+      if (mounted) {
+        setUser(data.session?.user ?? null);
+        setCheckingSession(false);
+      }
+    });
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setCheckingSession(false);
+    });
+    return () => { mounted = false; subscription.unsubscribe(); };
+  }, []);
+
+  if (checkingSession) {
+    return <div className="auth-loading"><div className="auth-spinner" /><p>Loading PetWatch…</p></div>;
+  }
+  return user ? <Dashboard user={user} /> : <AuthScreen />;
+}
+
+function AuthScreen() {
+  const [mode, setMode] = useState<"login" | "signup" | "forgot">("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(""); setMessage("");
+    if (mode === "forgot") {
+      setLoading(true);
+      try {
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: window.location.origin });
+        if (resetError) throw resetError;
+        setMessage("If an account exists for that email, a password reset link has been sent.");
+      } catch (err) { setError(err instanceof Error ? err.message : "Unable to send reset email."); }
+      finally { setLoading(false); }
+      return;
+    }
+    if (mode === "signup" && password !== confirmPassword) {
+      setError("Your passwords do not match."); return;
+    }
+    if (password.length < 8) {
+      setError("Use a password with at least 8 characters."); return;
+    }
+    setLoading(true);
+    try {
+      if (mode === "signup") {
+        const { data, error: authError } = await supabase.auth.signUp({
+          email: email.trim(), password,
+          options: { emailRedirectTo: window.location.origin },
+        });
+        if (authError) throw authError;
+        if (data.session) {
+          setMessage("Your account has been created. Welcome to PetWatch!");
+        } else {
+          setMessage("Account created. Check your email for the confirmation link, then log in.");
+          setMode("login");
+        }
+      } else {
+        const { error: authError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        if (authError) throw authError;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Authentication failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <main className="auth-page">
+      <section className="auth-card">
+        <div className="auth-brand"><BrandMark /><span>petwatch</span></div>
+        <div className="auth-intro">
+          <span className="auth-eyebrow">SMART PET CARE</span>
+          <h1>{mode === "login" ? "Welcome back" : mode === "signup" ? "Create your account" : "Reset your password"}</h1>
+          <p>{mode === "login" ? "Sign in to check on your pet and manage your device." : mode === "signup" ? "Sign up to start managing your PetWatch device." : "Enter your email and we’ll send you a password reset link."}</p>
+        </div>
+        <form className="auth-form" onSubmit={handleSubmit}>
+          <label htmlFor="auth-email">Email address</label>
+          <input id="auth-email" type="email" autoComplete="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" />
+          {mode !== "forgot" && <>
+            <label htmlFor="auth-password">Password</label>
+            <div className="password-wrap"><input id="auth-password" type={showPassword ? "text" : "password"} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} required value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 8 characters" /><button type="button" className="password-toggle" onClick={() => setShowPassword(v => !v)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div>
+          </>}
+          {mode === "signup" && <>
+            <label htmlFor="auth-confirm">Confirm password</label>
+            <div className="password-wrap"><input id="auth-confirm" type={showConfirmPassword ? "text" : "password"} autoComplete="new-password" minLength={8} required value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} placeholder="Enter your password again" /><button type="button" className="password-toggle" onClick={() => setShowConfirmPassword(v => !v)} aria-label={showConfirmPassword ? "Hide password" : "Show password"}>{showConfirmPassword ? "Hide" : "Show"}</button></div>
+          </>}
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          {message && <p className="auth-success" role="status">{message}</p>}
+          <button className="auth-submit" type="submit" disabled={loading}>{loading ? "Please wait…" : mode === "login" ? "Log in" : mode === "signup" ? "Create account" : "Send reset link"}</button>
+        </form>
+        <p className="auth-switch">{mode === "login" ? "New to PetWatch?" : mode === "signup" ? "Already have an account?" : "Remembered your password?"} <button onClick={() => { setMode(mode === "login" ? "signup" : "login"); setError(""); setMessage(""); }}>{mode === "login" ? "Sign up" : "Log in"}</button></p>
+        {mode === "login" && <p className="auth-switch forgot-link"><button onClick={() => { setMode("forgot"); setError(""); setMessage(""); }}>Forgot password?</button></p>}
+        <p className="auth-footnote">Secure access powered by Supabase</p>
+      </section>
+    </main>
+  );
+}
+
+function Dashboard({ user }: { user: User }) {
   const [page, setPage] = useState<Page>("dashboard");
   const [mobileNav, setMobileNav] = useState(false);
   const [now, setNow] = useState(new Date());
@@ -572,6 +687,18 @@ function App() {
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [sensor, setSensor] = useState<SensorReading | null>(null);
   const [deviceStatus, setDeviceStatus] = useState<DeviceStatus | null>(null);
+  const [profileName, setProfileName] = useState(String(user.user_metadata?.full_name ?? ""));
+  const [petName, setPetName] = useState(String(user.user_metadata?.pet_name ?? ""));
+  const [avatarUrl, setAvatarUrl] = useState(String(user.user_metadata?.avatar_url ?? ""));
+  const [profileOpen, setProfileOpen] = useState(() => window.location.hash.includes("type=recovery"));
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState("");
+  const [profileSuccess, setProfileSuccess] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmNewPassword, setShowConfirmNewPassword] = useState(false);
+  const [passwordSaving, setPasswordSaving] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
   const [amount, setAmount] = useState("85");
   const [savedAmount, setSavedAmount] = useState(85);
@@ -608,6 +735,17 @@ function App() {
   const [historySearch, setHistorySearch] = useState("");
   const [customFrom, setCustomFrom] = useState(dateInputValue(7));
   const [customTo, setCustomTo] = useState(dateInputValue(0));
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      const { data, error } = await supabase.from("profiles").select("full_name,pet_name,avatar_url").eq("id", user.id).maybeSingle();
+      if (!active) return;
+      if (error && error.code !== "PGRST116") console.warn("Profile load:", error.message);
+      if (data) { setProfileName(data.full_name ?? ""); setPetName(data.pet_name ?? ""); setAvatarUrl(data.avatar_url ?? ""); }
+    })();
+    return () => { active = false; };
+  }, [user.id]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
@@ -678,8 +816,8 @@ function App() {
         const isWater = /water/i.test(detail);
         const created = new Date(row.created_at);
         return {
-          id: Number(row.id), date: dateInputValue(0).replace(dateInputValue(0), `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, "0")}-${String(created.getDate()).padStart(2, "0")}`),
-          time: `${String(created.getHours()).padStart(2, "0")}:${String(created.getMinutes()).padStart(2, "0")}`,
+          id: Number(row.id), date: dateInputValue(0).replace(dateInputValue(0), `${created.getFullYear()}-${String(created.getMonth()+1).padStart(2,"0")}-${String(created.getDate()).padStart(2,"0")}`),
+          time: `${String(created.getHours()).padStart(2,"0")}:${String(created.getMinutes()).padStart(2,"0")}`,
           type: isWater ? "Water" : "Food", amount: Number(row.dispensed_weight_g ?? 0), unit: "g",
           status: row.status === "completed" ? "Successful" : "Failed", schedule: row.source === "schedule" ? "Scheduled routine" : "Manual dispensing",
           method: row.source === "schedule" ? "Automatic" : "Manual",
@@ -698,6 +836,45 @@ function App() {
     const timer = window.setInterval(loadLiveData, 5000);
     return () => { active = false; window.clearInterval(timer); };
   }, []);
+
+  const saveProfile = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setProfileSaving(true); setProfileError(""); setProfileSuccess("");
+    try {
+      const { error } = await supabase.from("profiles").upsert({ id: user.id, full_name: profileName.trim(), pet_name: petName.trim(), avatar_url: avatarUrl || null, updated_at: new Date().toISOString() });
+      if (error) throw error;
+      const { error: metaError } = await supabase.auth.updateUser({ data: { full_name: profileName.trim(), pet_name: petName.trim(), avatar_url: avatarUrl || null } });
+      if (metaError) throw metaError;
+      setProfileSuccess("Profile updated successfully.");
+    } catch (err) { setProfileError(err instanceof Error ? err.message : "Unable to save profile."); }
+    finally { setProfileSaving(false); }
+  };
+
+  const uploadAvatar = async (file?: File) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setProfileError("Please choose an image file."); return; }
+    if (file.size > 3 * 1024 * 1024) { setProfileError("Choose an image smaller than 3 MB."); return; }
+    setProfileSaving(true); setProfileError("");
+    try {
+      const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
+      const path = `${user.id}/avatar-${Date.now()}.${ext}`;
+      const { error: uploadError } = await supabase.storage.from("profile-avatars").upload(path, file, { upsert: true, contentType: file.type });
+      if (uploadError) throw uploadError;
+      const { data } = supabase.storage.from("profile-avatars").getPublicUrl(path);
+      setAvatarUrl(data.publicUrl);
+      setProfileSuccess("Photo uploaded. Save your profile to apply it.");
+    } catch (err) { setProfileError(err instanceof Error ? err.message : "Photo upload failed. Check the profile-avatars bucket."); }
+    finally { setProfileSaving(false); }
+  };
+
+  const changePassword = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault(); setProfileError(""); setProfileSuccess("");
+    if (newPassword.length < 8) { setProfileError("Use at least 8 characters for your new password."); return; }
+    if (newPassword !== confirmNewPassword) { setProfileError("The new passwords do not match."); return; }
+    setPasswordSaving(true);
+    const { error } = await supabase.auth.updateUser({ password: newPassword });
+    setPasswordSaving(false);
+    if (error) setProfileError(error.message); else { setProfileSuccess("Password changed successfully."); setNewPassword(""); setConfirmNewPassword(""); if (window.location.hash.includes("type=recovery")) window.history.replaceState({}, document.title, window.location.pathname + window.location.search); }
+  };
 
   const navigate = (next: Page) => {
     setPage(next);
@@ -892,10 +1069,10 @@ function App() {
     setToast("Food and water dispensing requests sent to PetWatch");
   };
 
-  const deviceIsOnline = Boolean(
-    deviceStatus?.is_online && deviceStatus.last_seen &&
-    Date.now() - new Date(deviceStatus.last_seen).getTime() < 30000
-  );
+  const deviceLastSeen = deviceStatus?.last_seen || sensor?.created_at || null;
+  const heartbeatFresh = Boolean(deviceLastSeen && Date.now() - new Date(deviceLastSeen).getTime() < 30000);
+  const deviceIsOnline = Boolean(heartbeatFresh && (deviceStatus?.is_online !== false || !deviceStatus));
+  const deviceLabel = !deviceLastSeen ? "Unknown" : heartbeatFresh ? "Online" : "Offline";
   const unreadCount = alerts.filter((alert) => alert.unread).length;
   const filteredAlerts = useMemo(
     () =>
@@ -996,58 +1173,9 @@ function App() {
     [filteredHistory],
   );
 
-
-  const markAlertAsRead = async (alertId: number) => {
-    const { data, error } = await supabase
-      .from("alerts")
-      .update({ is_read: true })
-      .eq("id", alertId)
-      .select("id");
-
-    if (error) {
-      console.error("Error marking alert as read:", error.message);
-      setToast("Unable to mark alert as read. Please try again.");
-      return;
-    }
-
-    if (!data || data.length === 0) {
-      console.error("No alert was updated. Check Supabase RLS policies and alert ID.");
-      setToast("Alert was not updated. Check database permissions.");
-      return;
-    }
-
-    setAlerts((items) =>
-      items.map((item) =>
-        item.id === alertId ? { ...item, unread: false } : item
-      )
-    );
-
-    setToast("Alert marked as read");
-  };
-
-  const markAllAlertsAsRead = async () => {
-    const { data, error } = await supabase
-      .from("alerts")
-      .update({ is_read: true })
-      .eq("is_read", false)
-      .select("id");
-
-    if (error) {
-      console.error("Error marking all alerts as read:", error.message);
-      setToast("Unable to update alerts. Please try again.");
-      return;
-    }
-
-    setAlerts((items) =>
-      items.map((item) => ({ ...item, unread: false }))
-    );
-
-    setToast(`${data?.length ?? 0} alerts marked as read`);
-  };
-
   const headerTitle =
     page === "dashboard"
-      ? "Good morning, Jamie"
+      ? `Good morning${profileName ? `, ${profileName.split(" ")[0]}` : ""}`
       : page === "schedule"
         ? "Feeding schedule"
         : page === "consumption"
@@ -1057,7 +1185,7 @@ function App() {
             : "Alerts";
   const headerSubtitle =
     page === "dashboard"
-      ? "Here’s what’s happening with Milo today."
+      ? `Here’s what’s happening with ${petName || "your pet"} today.`
       : page === "schedule"
         ? "Create and manage automatic feeding routines."
         : page === "consumption"
@@ -1106,22 +1234,19 @@ function App() {
               <div>
                 <strong>Kitchen feeder</strong>
                 <span>
-                  <i /> {deviceStatus?.is_online ? "Online" : "Offline / Unknown"}
+                  <i /> {deviceLabel}
                 </span>
               </div>
             </div>
-            <button onClick={() => setToast(deviceStatus?.last_seen ? `Last seen: ${new Date(deviceStatus.last_seen).toLocaleString()}` : "No device heartbeat has been recorded yet")}>
+            <button onClick={() => setToast(deviceLastSeen ? `Last seen: ${new Date(deviceLastSeen).toLocaleString()}` : "No recent device or sensor activity has been recorded yet")}>
               Device details <Icon name="chevron" size={15} />
             </button>
           </div>
-          <div className="profile">
-            <span className="avatar">JM</span>
-            <div>
-              <strong>Jamie Morris</strong>
-              <span>Milo’s human</span>
-            </div>
-            <Icon name="more" />
-          </div>
+          <button className="profile profile-button" onClick={() => { setProfileOpen(true); setProfileError(""); setProfileSuccess(""); }} aria-label="Edit profile">
+            {avatarUrl ? <img className="avatar avatar-image" src={avatarUrl} alt="Profile" /> : <span className="avatar">{(profileName || user.email || "P").slice(0, 1).toUpperCase()}</span>}
+            <div><strong>{profileName || user.email || "PetWatch user"}</strong><span>{petName ? `Pet: ${petName}` : "Edit your profile"}</span></div>
+            <Icon name="edit" />
+          </button>
         </div>
       </aside>
       {mobileNav && (
@@ -1149,7 +1274,7 @@ function App() {
               <Icon name="bell" />
               {unreadCount > 0 && <span>{unreadCount}</span>}
             </button>
-            <span className="top-avatar">JM</span>
+            <button className="signout-button" onClick={async () => { await supabase.auth.signOut(); }} title="Sign out">Sign out</button>
           </div>
         </header>
 
@@ -1188,7 +1313,7 @@ function App() {
                 </p>
               </div>
               <div className="pet-orbit" aria-hidden="true">
-                <div className="pet-avatar">M</div>
+                <div className="pet-avatar">{petName ? petName.slice(0, 1).toUpperCase() : "P"}</div>
                 <span className="orbit-one" />
                 <span className="orbit-two" />
               </div>
@@ -1365,10 +1490,9 @@ function App() {
                     <button
                       key={alert.id}
                       className="alert-preview"
-                      onClick={async () => {
-                        if (alert.unread) {
-                          await markAlertAsRead(alert.id);
-                        }
+                      onClick={() => {
+                        setAlerts((items) => items.map((item) => item.id === alert.id ? { ...item, unread: false } : item));
+                        void supabase.from("alerts").update({ is_read: true }).eq("id", alert.id);
                         navigate("alerts");
                       }}
                     >
@@ -1511,7 +1635,7 @@ function App() {
                         </button>
                       </div>
                     )
-                    ))}
+                  ))}
                 </div>
               </section>
 
@@ -1933,7 +2057,11 @@ function App() {
               <button
                 className="secondary-button"
                 disabled={unreadCount === 0}
-                onClick={markAllAlertsAsRead}
+                onClick={() => {
+                  setAlerts((items) => items.map((item) => ({ ...item, unread: false })));
+                  void supabase.from("alerts").update({ is_read: true }).eq("is_read", false);
+                  setToast("All alerts marked as read");
+                }}
               >
                 <Icon name="check" size={17} /> Mark all as read
               </button>
@@ -1986,7 +2114,15 @@ function App() {
                       {alert.unread ? (
                         <button
                           className="secondary-button compact"
-                          onClick={() => markAlertAsRead(alert.id)}
+                          onClick={() => {
+                            setAlerts((items) =>
+                              items.map((item) => item.id === alert.id ? { ...item, unread: false } : item),
+                            );
+                            void supabase
+                              .from("alerts")
+                              .update({ is_read: true })
+                              .eq("id", alert.id);
+                          }}
                         >
                           <Icon name="check" size={16} /> Mark as read
                         </button>
@@ -2014,6 +2150,23 @@ function App() {
           </div>
         )}
       </main>
+
+      {profileOpen && (
+        <div className="modal-layer" role="presentation" onMouseDown={event => event.target === event.currentTarget && setProfileOpen(false)}>
+          <section className="modal profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title">
+            <div className="modal-header"><div><span className="eyebrow">ACCOUNT SETTINGS</span><h2 id="profile-modal-title">Your profile</h2></div><button className="modal-close" onClick={() => setProfileOpen(false)} aria-label="Close"><Icon name="x" /></button></div>
+            <form onSubmit={saveProfile} className="profile-form">
+              <div className="avatar-upload-row">{avatarUrl ? <img src={avatarUrl} className="avatar-large" alt="Profile preview" /> : <div className="avatar-large avatar-placeholder">{(profileName || user.email || "P").slice(0,1).toUpperCase()}</div>}<div><strong>Profile photo</strong><small>Optional · JPG, PNG or WebP · up to 3 MB</small><label className="secondary-button upload-label">Choose photo<input type="file" accept="image/*" onChange={e => uploadAvatar(e.target.files?.[0])} hidden /></label>{avatarUrl && <button type="button" className="text-button" onClick={() => setAvatarUrl("")}>Remove photo</button>}</div></div>
+              <div className="form-field"><label htmlFor="profile-name">Your name</label><input className="text-input" id="profile-name" value={profileName} onChange={e => setProfileName(e.target.value)} placeholder="Enter your name" maxLength={80} /></div>
+              <div className="form-field"><label htmlFor="pet-name">Pet name</label><input className="text-input" id="pet-name" value={petName} onChange={e => setPetName(e.target.value)} placeholder="Enter your pet's name" maxLength={60} /></div>
+              <div className="form-field"><label>Email address</label><input className="text-input" value={user.email ?? ""} disabled /></div>
+              {profileError && <p className="auth-error">{profileError}</p>}{profileSuccess && <p className="auth-success">{profileSuccess}</p>}
+              <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setProfileOpen(false)}>Close</button><button className="primary-button" type="submit" disabled={profileSaving}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
+            </form>
+            <div className="password-section"><h3>Change password</h3><form onSubmit={changePassword} className="profile-form"><div className="form-field"><label htmlFor="new-password">New password</label><div className="password-wrap"><input className="text-input" id="new-password" type={showNewPassword ? "text" : "password"} minLength={8} required value={newPassword} onChange={e => setNewPassword(e.target.value)} placeholder="At least 8 characters"/><button type="button" className="password-toggle" onClick={() => setShowNewPassword(v => !v)}>{showNewPassword ? "Hide" : "Show"}</button></div></div><div className="form-field"><label htmlFor="confirm-new-password">Confirm new password</label><div className="password-wrap"><input className="text-input" id="confirm-new-password" type={showConfirmNewPassword ? "text" : "password"} minLength={8} required value={confirmNewPassword} onChange={e => setConfirmNewPassword(e.target.value)} placeholder="Re-enter new password"/><button type="button" className="password-toggle" onClick={() => setShowConfirmNewPassword(v => !v)}>{showConfirmNewPassword ? "Hide" : "Show"}</button></div></div><button className="secondary-button" type="submit" disabled={passwordSaving}>{passwordSaving ? "Updating…" : "Update password"}</button></form></div>
+          </section>
+        </div>
+      )}
 
       {editorOpen && (
         <div
